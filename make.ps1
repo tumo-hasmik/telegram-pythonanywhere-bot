@@ -71,12 +71,45 @@ function Invoke-Native {
     }
 }
 
+function New-RepoVenv {
+    # Create .venv using the first Python on PATH that actually produces an
+    # interpreter at $VenvPy. Returns $true on success, $false if none worked.
+    #
+    # Deliberately "try it and check the result" rather than trusting
+    # `Get-Command`: on Windows, `py`/`python` may resolve to a Microsoft
+    # Store app-execution-alias stub (a 0-byte shim under
+    # %LOCALAPPDATA%\Microsoft\WindowsApps). When no real Python backs it,
+    # that stub exits 0 and creates NOTHING, so `Get-Command` finding it —
+    # or even the venv command "succeeding" — proves nothing. The only
+    # reliable signal is whether .venv\Scripts\python.exe actually appeared.
+    # If `py` is such a stub we fall through to `python`/`python3` (e.g. a
+    # scoop-installed Python), which is why a student whose `python --version`
+    # works can still hit the old failure: the script tried `py` first.
+    #
+    # The stub also prints "Python was not found" to stderr, which
+    # $ErrorActionPreference='Stop' would turn into a terminating error, so
+    # each attempt is wrapped in try/catch.
+    foreach ($name in 'py', 'python', 'python3') {
+        if (-not (Get-Command $name -ErrorAction SilentlyContinue)) { continue }
+        Remove-Item -LiteralPath (Join-Path $RepoRoot '.venv') -Recurse -Force -ErrorAction SilentlyContinue
+        $venvArgs = if ($name -eq 'py') { @('-3', '-m', 'venv', '.venv') } else { @('-m', 'venv', '.venv') }
+        Write-Host "Creating .venv using '$name'..." -ForegroundColor Cyan
+        try { & $name @venvArgs 2>&1 | Out-Null } catch { }
+        if (Test-Path -LiteralPath $VenvPy) { return $true }
+        Write-Host "  '$name' produced no interpreter (likely a Store stub); trying next." -ForegroundColor DarkYellow
+    }
+    return $false
+}
+
 switch ($Target.ToLower()) {
     'install' {
-        # Prefer the Windows 'py' launcher; fall back to 'python' on PATH.
-        if (Get-Command py -ErrorAction SilentlyContinue) { Invoke-Native { py -3 -m venv .venv } }
-        elseif (Get-Command python -ErrorAction SilentlyContinue) { Invoke-Native { python -m venv .venv } }
-        else { Write-Host "ERROR: Python not found. Install Python 3.13 from python.org and re-run." -ForegroundColor Red; exit 1 }
+        if (-not (New-RepoVenv)) {
+            Write-Host "ERROR: Could not create a virtualenv with any Python on PATH." -ForegroundColor Red
+            Write-Host "  A Microsoft Store 'python'/'py' stub does not count - it does nothing." -ForegroundColor Red
+            Write-Host "  Install Python 3.12+ from https://python.org (tick 'Add python.exe to PATH')," -ForegroundColor Yellow
+            Write-Host "  or run 'scoop install python', then open a NEW PowerShell window and re-run." -ForegroundColor Yellow
+            exit 1
+        }
         Invoke-Native { & $VenvPy -m pip install --upgrade pip }
         Invoke-Native { & $VenvPy -m pip install -r requirements.txt }
     }

@@ -1,8 +1,25 @@
-import fcntl
 import hmac
 import os
 import subprocess
 from flask import Flask, request
+
+try:
+    import fcntl
+except ImportError:
+    # fcntl is Unix-only. Production runs on PythonAnywhere (Linux), where
+    # the real module serializes concurrent /api/deploy runs. On Windows
+    # (local dev / tests) it doesn't exist, so fall back to a no-op shim:
+    # the deploy lock becomes a no-op (nobody runs concurrent deploys on a
+    # dev box) and the module stays importable. flock stays patchable so
+    # the concurrency test can still simulate a held lock.
+    class _FcntlShim:
+        LOCK_EX = LOCK_NB = LOCK_UN = 0
+
+        @staticmethod
+        def flock(fd, op):
+            pass
+
+    fcntl = _FcntlShim()
 
 app = Flask(__name__)
 

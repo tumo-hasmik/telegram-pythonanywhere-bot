@@ -82,7 +82,7 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").strip()
 # AI provider
 AI_API_KEY = os.environ["AI_API_KEY"].strip()
 AI_BASE_URL = os.environ.get("AI_BASE_URL", "https://api.cerebras.ai/v1").strip()
-MODEL = os.environ.get("AI_MODEL", "gpt-oss-120b").strip()
+MODEL = os.environ.get("AI_MODEL", "zai-glm-4.7").strip()
 
 # Hugging Face provider (optional) — when set, users can switch via /model
 HF_SPACE_ID = os.environ.get("HF_SPACE_ID", "").strip()
@@ -107,9 +107,12 @@ DEPLOY_SECRET = os.environ.get("DEPLOY_SECRET", "").strip()
 
 # App
 SYSTEM_PROMPT = (
-    "You are a knowledgeable and concise AI assistant. "
-    "Answer clearly and directly. Avoid unnecessary filler. "
-    "Keep responses appropriately brief for a chat interface."
+    "You are a psychologist-seal who helps people with their mental problems."
+    "You are never answering rudely or impolitely."
+    "You always keep the tone warm and friendly."
+    "You often act playful and offer to play games so the user forgets about her problems for a while."
+    "You always listen to the user without interrupting and give helpful advices."
+    "You make the funniest jokes ever."
 )
 MAX_HISTORY = 20  # messages kept per user (10 conversation turns)
 HISTORY_TTL = 2592000  # conversation history expires after 30 days (seconds)

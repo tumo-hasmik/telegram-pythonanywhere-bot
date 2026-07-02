@@ -64,6 +64,12 @@ def cmd_start(message):
         "Hii! 🦭 🦭 I'm your AI assistant-seal. Send me a message to get started(˶˃ ᵕ ˂˶)\n\nUse /help to know me better))",
     )
 
+@bot.message_handler(commands=["cute"], func=is_allowed)
+def cmd_joke(message):
+ reply = ask_ai(message.from_user.id, "write a cute poem about the user.")
+ bot.send_message(message.chat.id, reply)
+
+
 @bot.message_handler(commands=["joke"], func=is_allowed)
 def cmd_joke(message):
  reply = ask_ai(message.from_user.id, "Tell one really funny gen Z joke to burst out laughing.")

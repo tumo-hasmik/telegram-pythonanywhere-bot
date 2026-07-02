@@ -106,7 +106,11 @@ $PaApi               = "https://www.pythonanywhere.com/api/v0/user/$PaUsername"
 $Domain              = "$PaUsername.pythonanywhere.com"
 $ProjectDir          = "/home/$PaUsername/$RepoName"
 $VenvDir             = "/home/$PaUsername/.virtualenvs/telegram-bot"
-$WsgiFile            = "/var/www/${PaUsername}_pythonanywhere_com_wsgi.py"
+# PA derives the WSGI filename from the LOWERCASED domain, regardless of the
+# case of your account/home dir (which keep their original case). Building this
+# from $PaUsername verbatim uploads to a file PA never reads, so the site keeps
+# serving PA's default hello-world page. Lowercase it.
+$WsgiFile            = "/var/www/$($PaUsername.ToLower())_pythonanywhere_com_wsgi.py"
 $WebhookUrlResolved  = "https://$Domain/api/webhook"
 $PythonVersion       = 'python313'
 
@@ -134,13 +138,23 @@ function Invoke-Pa {
     if (-not $NoAuth) { $headers['Authorization'] = "Token $PaToken" }
     $p = @{
         Uri = $uri; Method = $Method; Headers = $headers; TimeoutSec = $TimeoutSec
-        SkipHttpErrorCheck = $true; StatusCodeVariable = 'code'
+        SkipHttpErrorCheck = $true
     }
     if ($Form)              { $p.Form = $Body }
-    elseif ($null -ne $Body) { $p.Body = $Body }
+    elseif ($null -ne $Body) {
+        # PS7 auto-form-encodes a hashtable body for POST but NOT for PATCH, so a
+        # PATCH goes out with an empty Content-Type and PA replies 415. Set it
+        # explicitly — IWR still URL-encodes the hashtable, and POST is unaffected.
+        $p.Body = $Body
+        $p.ContentType = 'application/x-www-form-urlencoded'
+    }
     try {
+        # Read the status off the response object rather than -StatusCodeVariable:
+        # that parameter isn't present in all PowerShell 7.x builds (missing in
+        # 7.6.x), and referencing it makes every call throw. -SkipHttpErrorCheck
+        # already populates .StatusCode for 4xx/5xx, so this is version-proof.
         $resp = Invoke-WebRequest @p
-        return [pscustomobject]@{ Code = [int]$code; Body = [string]$resp.Content }
+        return [pscustomobject]@{ Code = [int]$resp.StatusCode; Body = [string]$resp.Content }
     } catch {
         # Network-level failure (DNS, TLS, timeout) — no HTTP status.
         return [pscustomobject]@{ Code = 0; Body = [string]$_.Exception.Message }

@@ -204,6 +204,12 @@ def cmd_about(message):
     bot.send_message(message.chat.id, "\n".join(lines))
 
 
+@bot.message_handler(commands=["sha"], func=is_allowed)
+def cmd_sha(message):
+    sha = COMMIT_SHA or "unknown"
+    bot.send_message(message.chat.id, f"Live SHA: {sha}")
+
+
 if HF_SPACE_ID:
 
     @bot.message_handler(commands=["model"], func=is_allowed)

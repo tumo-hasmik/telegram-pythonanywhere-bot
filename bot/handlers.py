@@ -1,12 +1,20 @@
+import json
 import os
 import random
+import threading
+import time
 from datetime import datetime
+
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
+
 from bot.clients import bot, BOT_INFO, store
 from bot.config import COMMIT_SHA, HF_SPACE_ID, HOSTING_LABEL, MODEL, RATE_LIMIT
 from bot.ai import ask_ai
 from bot.helpers import is_allowed, keep_typing, send_reply, should_respond
 from bot.history import clear_history
 from bot.notes import add_note, clear_notes, get_notes
+from bot.mood import MOOD_LEVELS, log_mood
+from bot.pet import adopt, feed, get_pet, play, release, render_pet, save_pet
 from bot.game import (
     MAX_ATTEMPTS,
     _normalize,
@@ -18,6 +26,7 @@ from bot.game import (
     save_game,
 )
 from bot.preferences import get_provider, set_provider
+from bot.providers import generate
 from bot.rate_limit import is_rate_limited
 
 # Verbose console logging for local dev and teaching. Enabled by
@@ -137,12 +146,14 @@ def cmd_joke(message):
 
 @bot.message_handler(commands=["roast"], func=is_allowed)
 def cmd_roast(message):
-#  name = message.text.split(maxsplit=1)[1] if " " in message.text else "you"
-#name = input("Input your name")
- name = (message.from_user.id, "Ask the user for their name in 1 sentence")
-
- reply = ask_ai(message.from_user.id, f"Write a short, playful, friendly roast of {name}.")
- bot.send_message(message.chat.id, reply)
+    # Optional target: "/roast my playlist". Defaults to roasting the sender.
+    parts = (message.text or "").split(maxsplit=1)
+    target = parts[1].strip() if len(parts) > 1 else "the person talking to you"
+    reply = ask_ai(
+        message.from_user.id,
+        f"Write a short, playful, friendly (never mean or hurtful) roast of {target}.",
+    )
+    bot.send_message(message.chat.id, reply)
 
 
 @bot.message_handler(commands=["roll"], func=is_allowed)
@@ -173,9 +184,16 @@ def cmd_help(message):
     lines = [
         ask_ai(message.from_user.id, "In 2-3 sentences, introduce yourself and tell me how you can help.")
     ]
+ 
     if HF_SPACE_ID:
         lines.append("/model — switch AI provider")
     bot.send_message(message.chat.id, "\n".join(lines))
+
+
+@bot.message_handler(commands=["sha"], func=is_allowed)
+# def cmd_reset(message):
+#     clear_history(message.from_user.id)
+#     bot.send_message(message.chat.id, "Conversation cleared. Starting fresh!")
 
 
 @bot.message_handler(commands=["reset"], func=is_allowed)
@@ -208,6 +226,379 @@ def cmd_about(message):
 def cmd_sha(message):
     sha = COMMIT_SHA or "unknown"
     bot.send_message(message.chat.id, f"Live SHA: {sha}")
+
+
+# ── Mood check-in (/mood) ────────────────────────────────────────────────────
+# Emoji buttons; tapping one logs the mood (bot/mood.py) and gets a warm,
+# non-judgmental reply. No AI call — instant, free, and deterministic.
+
+_MOOD_REPLIES = {
+    "great": "Yesss! 🦭✨ So glad you're feeling great — soak it up!",
+    "good": "Love that for you 🙂🌊 Glad today's being kind.",
+    "okay": "Okay is completely valid 😌 I'm floating right here with you 🦭",
+    "down": "Sorry you're feeling down 🫂 Thanks for telling me. Want to talk it out, hear a /joke, or play a /game?",
+    "awful": "That sounds really heavy 🫂 I'm here with you. If it stays this rough, please lean on someone you trust too 🦭",
+}
+
+
+@bot.message_handler(commands=["mood"], func=is_allowed)
+def cmd_mood(message):
+    markup = InlineKeyboardMarkup(row_width=5)
+    markup.add(
+        *[
+            InlineKeyboardButton(label.split()[0], callback_data=f"mood:{level}")
+            for level, label in MOOD_LEVELS.items()
+        ]
+    )
+    bot.send_message(
+        message.chat.id, "How are you feeling right now? Tap one 🦭", reply_markup=markup
+    )
+
+
+@bot.callback_query_handler(func=lambda c: (c.data or "").startswith("mood:"))
+def cb_mood(call):
+    level = (call.data or "").split(":", 1)[1]
+    log_mood(call.from_user.id, level)  # no-op in stateless mode
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print(f"answer_callback_query error: {e}")
+    bot.send_message(
+        call.message.chat.id, _MOOD_REPLIES.get(level, "Thanks for checking in 🦭")
+    )
+
+
+# ── Guided breathing (/breathe) ──────────────────────────────────────────────
+# A 4-7-8 exercise animated by editing one message. The timed steps run in a
+# background daemon thread (like keep_typing) so the webhook handler returns
+# immediately — blocking ~40s inline would tie up PA's single worker and trip
+# Telegram's webhook-timeout retry.
+
+_BREATHE_STEPS = [("Breathe in… 🫁", 4), ("Hold… ✨", 7), ("Breathe out… 🌬️", 8)]
+_BREATHE_CYCLES = 3
+
+
+def _run_breathing(chat_id: int, message_id: int) -> None:
+    try:
+        for cycle in range(_BREATHE_CYCLES):
+            for text, seconds in _BREATHE_STEPS:
+                bot.edit_message_text(
+                    f"{text}\n\ncycle {cycle + 1}/{_BREATHE_CYCLES}", chat_id, message_id
+                )
+                time.sleep(seconds)
+        bot.edit_message_text(
+            "Nicely done 🦭💙 However you feel now is okay.", chat_id, message_id
+        )
+    except Exception as e:
+        print(f"/breathe animation error: {e}")
+
+
+@bot.message_handler(commands=["breathe"], func=is_allowed)
+def cmd_breathe(message):
+    sent = bot.send_message(message.chat.id, "Let's breathe together 🦭 Follow along…")
+    threading.Thread(
+        target=_run_breathing, args=(message.chat.id, sent.message_id), daemon=True
+    ).start()
+
+
+# ── Telegram mini-games (/dice /dart /basket /bowl /slots) ───────────────────
+# "Beat the seal": the bot throws for you and for itself; higher value wins.
+# Uses Telegram's native animated dice — zero external calls, so these work on
+# PythonAnywhere even when the /game song fetch (iTunes) doesn't.
+
+# command -> (emoji, higher_value_wins). Slots has no ordering, so it's judged
+# by jackpot (value 64) instead.
+_MINIGAMES = {
+    "dice": ("🎲", True),
+    "dart": ("🎯", True),
+    "basket": ("🏀", True),
+    "bowl": ("🎳", True),
+    "slots": ("🎰", False),
+}
+# Telegram's dice animation takes ~3s to settle; wait before announcing so the
+# verdict doesn't spoil the reveal.
+_DICE_REVEAL_SECONDS = 3
+
+
+def _minigame_outcome(user_id: int, cmd: str, your_val: int, seal_val: int) -> str:
+    """Build the result message and record a win. Pure logic — no Telegram I/O."""
+    _, higher_wins = _MINIGAMES.get(cmd, ("🎲", True))
+    won = False
+    if not higher_wins:  # slots: only the 64 jackpot counts as a win
+        if your_val == 64:
+            result, won = "🎰 JACKPOT!! You win! 🦭🎉", True
+        else:
+            result = "🎰 No jackpot this spin — try again? 🦭"
+    elif your_val > seal_val:
+        result, won = f"You threw {your_val}, I got {seal_val} — you win! 🦭🎉", True
+    elif your_val < seal_val:
+        result = f"You threw {your_val}, I got {seal_val} — I win this one! 🦭"
+    else:
+        result = f"We both landed on {your_val} — it's a tie! 🤝🦭"
+    if won and store is not None:
+        try:
+            wins = store.incr(f"minigame_wins:{user_id}")
+            if wins:
+                result += f"\nWins vs. the seal: {wins} 🏆"
+        except Exception as e:
+            print(f"minigame win incr error: {e}")
+    return result
+
+
+@bot.message_handler(commands=list(_MINIGAMES.keys()), func=is_allowed)
+def cmd_minigame(message):
+    # message.text is like "/dart" or "/dart@BotName" — recover the command.
+    cmd = (message.text or "").split()[0].lstrip("/").split("@")[0].lower()
+    emoji, _ = _MINIGAMES.get(cmd, ("🎲", True))
+    chat_id = message.chat.id
+    you = bot.send_dice(chat_id, emoji=emoji)
+    seal = bot.send_dice(chat_id, emoji=emoji)
+    result = _minigame_outcome(
+        message.from_user.id, cmd, you.dice.value, seal.dice.value
+    )
+
+    # Announce after the animation settles, from a daemon thread so the webhook
+    # handler returns immediately (same reasoning as /breathe).
+    def announce():
+        time.sleep(_DICE_REVEAL_SECONDS)
+        try:
+            bot.send_message(chat_id, result)
+        except Exception as e:
+            print(f"minigame announce error: {e}")
+
+    threading.Thread(target=announce, daemon=True).start()
+
+
+# ── Trivia (/trivia) ─────────────────────────────────────────────────────────
+# One AI-written multiple-choice question delivered as a native Telegram quiz
+# poll (Telegram scores the answer). Uses generate() directly with a one-off
+# prompt so the seal persona + chat history don't corrupt the JSON.
+
+_TRIVIA_PROMPT = (
+    "Generate ONE fun, light general-knowledge trivia question suitable for teens. "
+    "Reply with ONLY valid JSON (no markdown, no prose) in exactly this shape: "
+    '{"question": "...", "options": ["a", "b", "c", "d"], "correct_index": 0, '
+    '"explanation": "..."}. '
+    "options must have exactly 4 entries; correct_index is 0-3; explanation is one short sentence."
+)
+_TRIVIA_FALLBACK = {
+    "question": "🦭 Which is the largest ocean on Earth?",
+    "options": ["Atlantic", "Indian", "Pacific", "Arctic"],
+    "correct_index": 2,
+    "explanation": "The Pacific is the largest and deepest ocean.",
+}
+
+
+def _extract_json(raw: str) -> str:
+    """Pull the JSON object out of a model reply that may be fenced or padded."""
+    text = (raw or "").strip()
+    start, end = text.find("{"), text.rfind("}")
+    return text[start : end + 1] if start != -1 and end > start else text
+
+
+def _make_trivia() -> dict:
+    """Ask the model for a quiz question; fall back to a canned one if the
+    reply isn't usable JSON. Always returns a validated dict."""
+    try:
+        raw = generate(0, [{"role": "user", "content": _TRIVIA_PROMPT}])
+        data = json.loads(_extract_json(raw))
+        question = str(data["question"]).strip()
+        options = data["options"]
+        idx = int(data["correct_index"])
+        if (
+            not question
+            or not isinstance(options, list)
+            or len(options) != 4
+            or not 0 <= idx <= 3
+        ):
+            raise ValueError("trivia JSON failed validation")
+        return {
+            "question": question,
+            "options": [str(o).strip() for o in options],
+            "correct_index": idx,
+            "explanation": str(data.get("explanation", "")).strip()[:200],
+        }
+    except Exception as e:
+        print(f"/trivia generation failed, using fallback: {e}")
+        return dict(_TRIVIA_FALLBACK)
+
+
+@bot.message_handler(commands=["trivia"], func=is_allowed)
+def cmd_trivia(message):
+    q = _make_trivia()
+    try:
+        bot.send_poll(
+            message.chat.id,
+            q["question"],
+            q["options"],
+            type="quiz",
+            correct_option_id=q["correct_index"],
+            is_anonymous=False,
+            explanation=q["explanation"] or None,
+        )
+    except Exception as e:
+        print(f"send_poll error: {e}")
+        bot.send_message(
+            message.chat.id, "Couldn't start trivia right now 😔 Try again in a bit 🦭"
+        )
+
+
+# ── Virtual seal pet (/adopt /feed /play /pet /release) ──────────────────────
+# A Tamagotchi seal that lives in a PINNED message — the closest Telegram lets
+# a bot get to "always on screen" (a bot can't float an image in the chat
+# corner; it CAN pin a message to the top bar). Actions edit that same message
+# in place. The card is a real photo when assets/seal.* is bundled, else a cute
+# emoji status card — either way whitelist-proof (local file / no fetch). Stats
+# decay over real time; state + logic live in bot/pet.py. Needs the store.
+
+# Detected once at import: the bundled seal image, if the owner added one.
+_SEAL_IMAGE = None
+for _seal_name in ("seal.jpg", "seal.jpeg", "seal.png", "seal.webp"):
+    _seal_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", _seal_name
+    )
+    if os.path.exists(_seal_path):
+        _SEAL_IMAGE = _seal_path
+        break
+
+
+def _send_pet_card(chat_id: int, pet: dict):
+    """Send the pet card as a photo (if a seal image is bundled) or as text.
+    Returns (sent_message, is_photo)."""
+    card = render_pet(pet)
+    if _SEAL_IMAGE:
+        try:
+            with open(_SEAL_IMAGE, "rb") as image:
+                return bot.send_photo(chat_id, image, caption=card), True
+        except Exception as e:
+            print(f"send_photo (pet) failed, falling back to text: {e}")
+    return bot.send_message(chat_id, card), False
+
+
+def _edit_pet_card(pet: dict) -> bool:
+    """Edit the pinned card in place to reflect current stats. Returns False if
+    it couldn't (e.g. the message was deleted) so the caller can re-send."""
+    msg_id = pet.get("msg_id")
+    chat_id = pet.get("chat_id")
+    if not msg_id or not chat_id:
+        return False
+    card = render_pet(pet)
+    try:
+        if pet.get("is_photo"):
+            bot.edit_message_caption(caption=card, chat_id=chat_id, message_id=msg_id)
+        else:
+            bot.edit_message_text(card, chat_id, msg_id)
+        return True
+    except Exception as e:
+        print(f"edit pet card failed: {e}")
+        return False
+
+
+def _refresh_card(message, pet: dict) -> None:
+    """Update the pinned card; if the old message is gone, re-send and re-pin."""
+    if _edit_pet_card(pet):
+        return
+    sent, is_photo = _send_pet_card(message.chat.id, pet)
+    pet["chat_id"] = message.chat.id
+    pet["msg_id"] = sent.message_id
+    pet["is_photo"] = is_photo
+    save_pet(message.from_user.id, pet)
+    try:
+        bot.pin_chat_message(message.chat.id, sent.message_id, disable_notification=True)
+    except Exception as e:
+        print(f"re-pin pet card failed: {e}")
+
+
+@bot.message_handler(commands=["adopt"], func=is_allowed)
+def cmd_adopt(message):
+    if store is None:
+        bot.send_message(
+            message.chat.id,
+            "Adopting needs memory turned on (SQLITE_PATH). Ask the bot owner 🦭",
+        )
+        return
+    existing = get_pet(message.from_user.id)
+    if existing:
+        bot.send_message(
+            message.chat.id,
+            f"You already have {existing['name']} 🦭 Use /pet to check on them, "
+            "/feed and /play to care for them (or /release to say goodbye).",
+        )
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    name = parts[1].strip()[:20] if len(parts) > 1 else "Sealy"
+    pet = adopt(message.from_user.id, name or "Sealy")
+    if pet is None:
+        bot.send_message(message.chat.id, "Couldn't adopt right now 😔 Try again later.")
+        return
+    sent, is_photo = _send_pet_card(message.chat.id, pet)
+    pet["chat_id"] = message.chat.id
+    pet["msg_id"] = sent.message_id
+    pet["is_photo"] = is_photo
+    save_pet(message.from_user.id, pet)
+    try:
+        bot.pin_chat_message(message.chat.id, sent.message_id, disable_notification=True)
+    except Exception as e:
+        print(f"pin pet card failed: {e}")
+    bot.send_message(
+        message.chat.id,
+        f"🎉 You adopted {pet['name']}! I pinned them up top so they're always in "
+        "view. Keep them fed (/feed) and happy (/play) 🦭",
+    )
+
+
+@bot.message_handler(commands=["feed"], func=is_allowed)
+def cmd_feed(message):
+    pet = feed(message.from_user.id)
+    if pet is None:
+        bot.send_message(message.chat.id, "You don't have a seal yet 🦭 Adopt one with /adopt")
+        return
+    _refresh_card(message, pet)
+    bot.send_message(
+        message.chat.id, f"Nom nom! 🍤 {pet['name']} is {int(pet['fullness'])}% full."
+    )
+
+
+@bot.message_handler(commands=["play"], func=is_allowed)
+def cmd_play(message):
+    pet = play(message.from_user.id)
+    if pet is None:
+        bot.send_message(message.chat.id, "You don't have a seal yet 🦭 Adopt one with /adopt")
+        return
+    _refresh_card(message, pet)
+    bot.send_message(
+        message.chat.id,
+        f"Wheee! 🎾 {pet['name']} is {int(pet['happiness'])}% happy (and a bit hungrier).",
+    )
+
+
+@bot.message_handler(commands=["pet"], func=is_allowed)
+def cmd_pet(message):
+    pet = get_pet(message.from_user.id)
+    if pet is None:
+        bot.send_message(message.chat.id, "You don't have a seal yet 🦭 Adopt one with /adopt")
+        return
+    save_pet(message.from_user.id, pet)  # checkpoint the decay snapshot
+    _refresh_card(message, pet)
+
+
+@bot.message_handler(commands=["release"], func=is_allowed)
+def cmd_release(message):
+    pet = get_pet(message.from_user.id)
+    if pet is None:
+        bot.send_message(message.chat.id, "You don't have a seal to release 🦭")
+        return
+    msg_id = pet.get("msg_id")
+    if msg_id:
+        try:
+            bot.unpin_chat_message(message.chat.id, msg_id)
+        except Exception as e:
+            print(f"unpin on release failed: {e}")
+    release(message.from_user.id)
+    bot.send_message(
+        message.chat.id,
+        f"You released {pet['name']} back into the ocean 🌊🦭 Thanks for caring for them.",
+    )
 
 
 if HF_SPACE_ID:

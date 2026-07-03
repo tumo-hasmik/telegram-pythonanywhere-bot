@@ -142,3 +142,45 @@ def register_webhook() -> str:
     if result is False:
         return f"Webhook registration: Telegram returned False for {WEBHOOK_URL}"
     return f"Webhook registered: {WEBHOOK_URL}"
+
+
+def set_bot_commands() -> str:
+    """Register Telegram's "/" command menu (the blue autocomplete list).
+
+    Best-effort and idempotent, like register_webhook(): any failure is caught
+    so a proxy blip or bad token can't crash worker boot. Returns a status
+    string for logging. /model is listed only when HF_SPACE_ID is set, mirroring
+    that command's gated registration in bot/handlers.py.
+    """
+    from telebot.types import BotCommand
+
+    from bot.config import HF_SPACE_ID
+
+    commands = [
+        BotCommand("start", "Meet the seal 🦭"),
+        BotCommand("help", "What I can do"),
+        BotCommand("mood", "Check in on how you feel"),
+        BotCommand("breathe", "Guided breathing 🫁"),
+        BotCommand("adopt", "Adopt a virtual seal 🦭"),
+        BotCommand("game", "Guess-the-song game 🎵"),
+        BotCommand("trivia", "A quick quiz question ❓"),
+        BotCommand("dice", "Beat the seal at dice 🎲"),
+        BotCommand("joke", "Hear a genZ joke 😂"),
+        BotCommand("cute", "A cute little poem 🩵"),
+        BotCommand("compliment", "Get a compliment ✨"),
+        BotCommand("fact", "An ocean fact 🌊"),
+        BotCommand("roll", "Roll a quick die"),
+        BotCommand("remember", "Save a note 📝"),
+        BotCommand("recall", "See your saved notes"),
+        BotCommand("forget", "Clear your notes 🧽"),
+        BotCommand("about", "About this bot"),
+        BotCommand("reset", "Clear our chat history"),
+    ]
+    if HF_SPACE_ID:
+        commands.append(BotCommand("model", "Switch AI provider"))
+
+    try:
+        bot.set_my_commands(commands)
+        return f"Command menu registered ({len(commands)} commands)"
+    except Exception as e:
+        return f"Command menu registration failed: {e}"

@@ -60,6 +60,7 @@ from api.index import app as application  # noqa: E402, F401
 # unset (e.g. local dev). Logged so the result shows up in PA's
 # server.log. Imported here (not at module top) so api/index.py's
 # Flask app finishes setup first.
-from bot.clients import register_webhook  # noqa: E402
+from bot.clients import register_webhook, set_bot_commands  # noqa: E402
 
 print(register_webhook())
+print(set_bot_commands())

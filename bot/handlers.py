@@ -61,7 +61,7 @@ def _log(message, direction: str, text: str) -> None:
 def cmd_start(message):
     bot.send_message(
         message.chat.id,
-        "Hii! 🦭 🦭 I'm your AI assistant-seal. Send me a message to get started(˶˃ ᵕ ˂˶)\n\nUse /help to know me better))",
+        "Hii! 🦭 🦭 I'm your AI assistant-seal. Send me a message to get started(˶˃ ᵕ ˂˶) \n\nUse /help to know me better)) DISCLAIMER: I'm not a professional specialist so you should see a trusted doctor if your problems are more complicated, I'm just talking to people so they SHORTLY forget about their problems.",
     )
 
 @bot.message_handler(commands=["cute"], func=is_allowed)

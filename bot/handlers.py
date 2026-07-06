@@ -8,7 +8,14 @@ from datetime import datetime
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.clients import bot, BOT_INFO, store
-from bot.config import COMMIT_SHA, HF_SPACE_ID, HOSTING_LABEL, MODEL, RATE_LIMIT
+from bot.config import (
+    COMMIT_SHA,
+    HF_SPACE_ID,
+    HOSTING_LABEL,
+    MODEL,
+    RATE_LIMIT,
+    SEAL_STICKER_SET,
+)
 from bot.ai import ask_ai
 from bot.helpers import is_allowed, keep_typing, send_reply, should_respond
 from bot.history import clear_history
@@ -77,6 +84,50 @@ def cmd_start(message):
 def cmd_joke(message):
  reply = ask_ai(message.from_user.id, "write a cute poem about the user.")
  bot.send_message(message.chat.id, reply)
+
+
+# ── Seal stickers (/sealie) ──────────────────────────────────────────────────
+# Sends a random sticker from the configured seal pack (SEAL_STICKER_SET).
+# The pack's sticker file_ids are fetched once from Telegram and cached, since
+# a public pack's contents rarely change and re-fetching on every call is waste.
+_seal_sticker_ids: list = []
+
+
+def _get_seal_sticker_ids() -> list:
+    """Return cached seal sticker file_ids, fetching the pack once on first use."""
+    global _seal_sticker_ids
+    if _seal_sticker_ids:
+        return _seal_sticker_ids
+    try:
+        sticker_set = bot.get_sticker_set(SEAL_STICKER_SET)
+        _seal_sticker_ids = [s.file_id for s in sticker_set.stickers]
+    except Exception as e:
+        print(f"Could not load seal sticker set {SEAL_STICKER_SET!r}: {e}")
+    return _seal_sticker_ids
+
+
+@bot.message_handler(commands=["sealie"], func=is_allowed)
+def cmd_sealie(message):
+    sticker_ids = _get_seal_sticker_ids()
+    if not sticker_ids:
+        bot.send_message(
+            message.chat.id, "My seal stickers are napping right now 🦭 Try again later!"
+        )
+        return
+    bot.send_sticker(message.chat.id, random.choice(sticker_ids))
+
+
+@bot.message_handler(commands=["poem"], func=is_allowed)
+def cmd_poem(message):
+    # ask_ai loads this user's conversation history and prepends it, so the
+    # model can write about the person based on what they've talked about.
+    reply = ask_ai(
+        message.from_user.id,
+        "Write a short, warm poem about me based on our previous conversation — "
+        "what I've talked about, my mood, and the little things I've shared. "
+        "If we haven't talked much yet, write a gentle poem welcoming me.",
+    )
+    bot.send_message(message.chat.id, reply)
 
 
 @bot.message_handler(commands=["joke"], func=is_allowed)
@@ -182,9 +233,30 @@ def cmd_roll(message):
 @bot.message_handler(commands=["help"], func=is_allowed)
 def cmd_help(message):
     lines = [
-        ask_ai(message.from_user.id, "In 2-3 sentences, introduce yourself and tell me how you can help.")
+        ask_ai(message.from_user.id, "In 2-3 sentences, introduce yourself and tell me how you can help."),
+        "",
+        "Here's what I can do 🦭",
+        "",
+        "💬 Just talk to me — I'm here to listen and chat.",
+        "/sealie — send a random seal sticker",
+        "/poem — a little poem about you, from our chats",
+        "/cute — a cute poem about you",
+        "/compliment — a compliment to make you blush",
+        "/joke — a funny gen Z joke",
+        "/roast — a playful, friendly roast",
+        "/quote — a deep quote to ponder",
+        "/fact — a fact about seals & the ocean",
+        "/mood — check in on how you're feeling",
+        "/breathe — a calming 4-7-8 breathing exercise",
+        "/remember · /recall · /forget — save & read little notes",
+        "/roll — roll a die (e.g. /roll 20)",
+        "/trivia — a quick trivia question",
+        "/game · /hint · /skip · /endgame — guess-the-song game",
+        "/dice · /dart · /basket · /bowl · /slots — beat the seal",
+        "/adopt · /feed · /play · /pet · /release — raise a seal pet",
+        "/reset — clear our conversation",
+        "/about — what's under the hood",
     ]
- 
     if HF_SPACE_ID:
         lines.append("/model — switch AI provider")
     bot.send_message(message.chat.id, "\n".join(lines))

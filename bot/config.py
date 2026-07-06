@@ -95,6 +95,14 @@ DEFAULT_PROVIDER = "main"
 # None` at the top of every function and return safe defaults).
 SQLITE_PATH = os.environ.get("SQLITE_PATH", "").strip()
 
+# Seal sticker pack for the /sealie command. This is the pack's short
+# name (the identifier in its t.me/addstickers/<name> link). The pack
+# need not be owned by the bot — Telegram's getStickerSet works on any
+# public pack. Override via env var to point at a different pack.
+SEAL_STICKER_SET = os.environ.get(
+    "SEAL_STICKER_SET", "tulenchikiii_by_fStikBot"
+).strip()
+
 # Label shown by the /about command. Defaults to "PythonAnywhere" since
 # that is the documented deployment target. Override to suit your host.
 HOSTING_LABEL = os.environ.get("HOSTING_LABEL", "PythonAnywhere").strip()
